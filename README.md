@@ -9,20 +9,6 @@ Local development setup using KinD, Traefik, Helm, and Kubernetes Gateway API.
 - Helm
 - KinD
 
-Pull Helm charts locally:
-
-```bash
-helm repo add traefik https://traefik.github.io/charts
-helm repo add argo https://argoproj.github.io/argo-helm
-helm repo update
-
-# Download charts to local directories
-helm pull traefik/traefik --untar
-helm pull argo/argo-cd --untar
-```
-
-This creates `traefik/` and `argo-cd/` directories containing the chart files.
-
 ## 1. Create KinD Cluster
 
 Create `kind-config.yaml`:
@@ -58,71 +44,48 @@ kind create cluster --config kind-config.yaml
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
 ```
 
-Verify installation:
+## 3. Create Traefik Chart
 
-```bash
-kubectl get crd | grep gateway
-```
-
-## 3. Install Traefik
-
-Create `traefik-values.yaml`:
+Create `charts/traefik/Chart.yaml`:
 
 ```yaml
-ports:
-  web:
-    hostPort: 80
-  websecure:
-    hostPort: 443
-
-nodeSelector:
-  ingress-ready: "true"
-
-tolerations:
-  - key: node-role.kubernetes.io/control-plane
-    operator: Equal
-    effect: NoSchedule
-
-providers:
-  kubernetesGateway:
-    enabled: true
-
-gateway:
-  enabled: false
+apiVersion: v2
+name: traefik
+version: 1.0.0
+description: Traefik ingress controller with Gateway API support
+dependencies:
+  - name: traefik
+    version: "34.3.0"
+    repository: "https://traefik.github.io/charts"
 ```
 
-```bash
-helm upgrade --install traefik ./traefik -n traefik --create-namespace -f traefik-values.yaml
-```
-
-## 4. Install ArgoCD
-
-Create `argocd-values.yaml`:
+Create `charts/traefik/values.yaml`:
 
 ```yaml
-dex:
-  enabled: false
+traefik:
+  ports:
+    web:
+      hostPort: 80
+    websecure:
+      hostPort: 443
 
-notifications:
-  enabled: false
+  nodeSelector:
+    ingress-ready: "true"
 
-applicationSet:
-  enabled: false
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Equal
+      effect: NoSchedule
 
-configs:
-  params:
-    server.insecure: true
+  providers:
+    kubernetesGateway:
+      enabled: true
+
+  gateway:
+    enabled: false
 ```
 
-```bash
-kubectl create namespace argocd
-helm upgrade --install argocd ./argo-cd -n argocd -f argocd-values.yaml
-kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
-```
-
-## 5. Create GatewayClass, Gateway, and HTTPRoute
-
-Create `gateway-class.yaml`:
+Create `charts/traefik/templates/gateway-class.yaml`:
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
@@ -133,14 +96,14 @@ spec:
   controllerName: traefik.io/gateway-controller
 ```
 
-Create `gateway.yaml`:
+Create `charts/traefik/templates/gateway.yaml`:
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: traefik-gateway
-  namespace: traefik
+  namespace: {{ .Release.Namespace }}
 spec:
   gatewayClassName: traefik
   listeners:
@@ -152,20 +115,68 @@ spec:
           from: All
 ```
 
-Create `argocd-httproute.yaml`:
+Build and install:
+
+```bash
+helm dependency build ./charts/traefik
+helm upgrade --install traefik ./charts/traefik -n traefik --create-namespace
+```
+
+## 4. Create ArgoCD Chart
+
+Create `charts/argocd/Chart.yaml`:
 
 ```yaml
+apiVersion: v2
+name: argocd
+version: 1.0.0
+description: ArgoCD with Gateway API HTTPRoute
+dependencies:
+  - name: argo-cd
+    version: "7.7.16"
+    repository: "https://argoproj.github.io/argo-helm"
+```
+
+Create `charts/argocd/values.yaml`:
+
+```yaml
+argo-cd:
+  dex:
+    enabled: false
+
+  notifications:
+    enabled: false
+
+  applicationSet:
+    enabled: false
+
+  configs:
+    params:
+      server.insecure: true
+
+httproute:
+  enabled: true
+  gateway:
+    name: traefik-gateway
+    namespace: traefik
+  hostname: argocd.localhost
+```
+
+Create `charts/argocd/templates/httproute.yaml`:
+
+```yaml
+{{- if .Values.httproute.enabled }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: argocd-server
-  namespace: argocd
+  namespace: {{ .Release.Namespace }}
 spec:
   parentRefs:
-    - name: traefik-gateway
-      namespace: traefik
+    - name: {{ .Values.httproute.gateway.name }}
+      namespace: {{ .Values.httproute.gateway.namespace }}
   hostnames:
-    - argocd.localhost
+    - {{ .Values.httproute.hostname }}
   rules:
     - matches:
         - path:
@@ -174,25 +185,18 @@ spec:
       backendRefs:
         - name: argocd-server
           port: 80
+{{- end }}
 ```
 
-Apply resources:
+Build and install:
 
 ```bash
-kubectl apply -f gateway-class.yaml
-kubectl apply -f gateway.yaml
-kubectl apply -f argocd-httproute.yaml
+helm dependency build ./charts/argocd
+helm upgrade --install argocd ./charts/argocd -n argocd --create-namespace
+kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
 ```
 
-Verify:
-
-```bash
-kubectl get gatewayclass
-kubectl get gateway -n traefik
-kubectl get httproute -n argocd
-```
-
-## 6. Access ArgoCD
+## 5. Access ArgoCD
 
 Get admin password:
 
@@ -200,7 +204,7 @@ Get admin password:
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
 ```
 
-Access UI at <http://argocd.localhost>
+Access UI at http://argocd.localhost
 
 CLI login:
 
