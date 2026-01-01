@@ -8,9 +8,6 @@
 !.gitignore
 !Chart.lock
 
-# Allow the directories
-#!helm/
-
 # Allow file types
 !*.yaml
 !*.md
