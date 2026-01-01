@@ -9,13 +9,19 @@ Local development setup using KinD, Traefik, Helm, and Kubernetes Gateway API.
 - Helm
 - KinD
 
-Add Helm repositories:
+Pull Helm charts locally:
 
 ```bash
 helm repo add traefik https://traefik.github.io/charts
 helm repo add argo https://argoproj.github.io/argo-helm
 helm repo update
+
+# Download charts to local directories
+helm pull traefik/traefik --untar
+helm pull argo/argo-cd --untar
 ```
+
+This creates `traefik/` and `argo-cd/` directories containing the chart files.
 
 ## 1. Create KinD Cluster
 
@@ -63,35 +69,30 @@ kubectl get crd | grep gateway
 Create `traefik-values.yaml`:
 
 ```yaml
-# Map host ports directly to Traefik's container ports
 ports:
   web:
-    hostPort: 80      # Host port 80 -> container port 8000 (Traefik's default)
+    hostPort: 80
   websecure:
-    hostPort: 443     # Host port 443 -> container port 8443 (Traefik's default)
+    hostPort: 443
 
-# Schedule on the node with KinD's extraPortMappings
 nodeSelector:
   ingress-ready: "true"
 
-# Allow scheduling on control-plane node
 tolerations:
   - key: node-role.kubernetes.io/control-plane
     operator: Equal
     effect: NoSchedule
 
-# Enable Gateway API provider
 providers:
   kubernetesGateway:
     enabled: true
 
-# We create our own Gateway resource
 gateway:
   enabled: false
 ```
 
 ```bash
-helm upgrade --install traefik traefik/traefik -n traefik --create-namespace -f traefik-values.yaml
+helm upgrade --install traefik ./traefik -n traefik --create-namespace -f traefik-values.yaml
 ```
 
 ## 4. Install ArgoCD
@@ -115,7 +116,7 @@ configs:
 
 ```bash
 kubectl create namespace argocd
-helm upgrade --install argocd argo/argo-cd -n argocd -f argocd-values.yaml
+helm upgrade --install argocd ./argo-cd -n argocd -f argocd-values.yaml
 kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
 ```
 
