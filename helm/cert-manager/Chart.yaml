@@ -1,0 +1,8 @@
+apiVersion: v2
+name: cert-manager
+version: 1.0.0
+description: cert-manager with self-signed ClusterIssuer
+dependencies:
+  - name: cert-manager
+    version: "1.17.1"
+    repository: "https://charts.jetstack.io"
