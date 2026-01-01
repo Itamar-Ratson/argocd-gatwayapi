@@ -1,6 +1,6 @@
 # ArgoCD Getting Started Guide (Gateway API)
 
-Local development setup using KinD, Traefik, Helm, cert-manager, Sealed Secrets, and Kubernetes Gateway API.
+Local development setup using KinD, Cilium (with WireGuard encryption), Traefik, Helm, cert-manager, Sealed Secrets, and Kubernetes Gateway API.
 
 ## Prerequisites
 
@@ -8,6 +8,8 @@ Local development setup using KinD, Traefik, Helm, cert-manager, Sealed Secrets,
 - kubectl
 - Helm
 - KinD
+- htpasswd (from apache2-utils)
+- kubeseal
 
 ## 1. Create KinD Cluster
 
@@ -17,6 +19,8 @@ Create `kind-config.yaml`:
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: argocd-dev
+networking:
+  disableDefaultCNI: true
 nodes:
   - role: control-plane
     kubeadmConfigPatches:
@@ -38,13 +42,70 @@ nodes:
 kind create cluster --config kind-config.yaml
 ```
 
-## 2. Install Gateway API CRDs
+The cluster won't be Ready until a CNI is installed (next step).
+
+## 2. Install Cilium (CNI with WireGuard Encryption)
+
+Cilium provides encrypted pod-to-pod communication using WireGuard.
+
+Create `helm/cilium/Chart.yaml`:
+
+```yaml
+apiVersion: v2
+name: cilium
+version: 1.0.0
+description: Cilium CNI with WireGuard encryption
+dependencies:
+  - name: cilium
+    version: "1.16.5"
+    repository: "https://helm.cilium.io"
+```
+
+Create `helm/cilium/values.yaml`:
+
+```yaml
+cilium:
+  # Enable WireGuard encryption for pod-to-pod traffic
+  encryption:
+    enabled: true
+    type: wireguard
+
+  # Required for hostPort support when replacing default CNI
+  hostPort:
+    enabled: true
+
+  # Required for KinD single-node clusters
+  socketLB:
+    hostNamespaceOnly: true
+
+  # Single node cluster only needs one operator replica
+  operator:
+    replicas: 1
+```
+
+Build and install:
+
+```bash
+helm repo add cilium https://helm.cilium.io
+helm repo update
+helm dependency build ./helm/cilium
+helm install cilium ./helm/cilium -n kube-system -f ./helm/cilium/values.yaml
+kubectl wait --for=condition=Ready nodes --all --timeout=300s
+```
+
+Verify encryption is active:
+
+```bash
+kubectl -n kube-system exec ds/cilium -- cilium-dbg encrypt status
+```
+
+## 3. Install Gateway API CRDs
 
 ```bash
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
 ```
 
-## 3. Install cert-manager
+## 4. Install cert-manager
 
 Create `helm/cert-manager/Chart.yaml`:
 
@@ -91,7 +152,7 @@ helm upgrade --install cert-manager ./helm/cert-manager -n cert-manager --create
 kubectl wait --for=condition=Available deployment/cert-manager -n cert-manager --timeout=120s
 ```
 
-## 4. Install Sealed Secrets
+## 5. Install Sealed Secrets
 
 Create `helm/sealed-secrets/Chart.yaml`:
 
@@ -138,7 +199,7 @@ Verify:
 kubeseal --controller-name sealed-secrets --controller-namespace sealed-secrets --fetch-cert
 ```
 
-## 5. Install Traefik
+## 6. Install Traefik
 
 Create `helm/traefik/Chart.yaml`:
 
@@ -157,11 +218,22 @@ Create `helm/traefik/values.yaml`:
 
 ```yaml
 traefik:
+  # Run in host network namespace for direct port binding
+  # This avoids Cilium hostPort eBPF complexity in KinD
+  hostNetwork: true
+
+  deployment:
+    # Recreate strategy required for hostNetwork deployments
+    # RollingUpdate would fail as old pod holds the port
+    strategy:
+      type: Recreate
+
+  # With hostNetwork, ports are bound directly on the host
   ports:
     web:
-      hostPort: 80
+      port: 80
     websecure:
-      hostPort: 443
+      port: 443
 
   nodeSelector:
     ingress-ready: "true"
@@ -203,7 +275,7 @@ spec:
   listeners:
     - name: https
       protocol: HTTPS
-      port: 8443
+      port: 443
       tls:
         mode: Terminate
         certificateRefs:
@@ -237,9 +309,10 @@ helm repo add traefik https://traefik.github.io/charts
 helm repo update
 helm dependency build ./helm/traefik
 helm upgrade --install traefik ./helm/traefik -n traefik --create-namespace
+kubectl wait --for=condition=Available deployment/traefik -n traefik --timeout=120s
 ```
 
-## 6. Install ArgoCD
+## 7. Install ArgoCD
 
 Create `helm/argocd/Chart.yaml`:
 
@@ -313,14 +386,30 @@ Create `example.argocd-admin-secret.yaml`:
 
 ```yaml
 # Example ArgoCD admin password secret
-# 
+#
 # Usage:
 #   1. Copy this file: cp example.argocd-admin-secret.yaml argocd-admin-secret.yaml
-#   2. Generate a bcrypt hash: htpasswd -nbBC 10 "" "your-password" | tr -d ':\n' | sed 's/$2y/$2a/'
-#   3. Generate a secret key: openssl rand -base64 32
-#   4. Replace the values below with your hash and secret key
-#   5. Seal it: kubeseal --controller-name sealed-secrets --controller-namespace sealed-secrets -o yaml < argocd-admin-secret.yaml > helm/argocd/templates/sealed-argocd-secret.yaml
+#
+#   2. Generate a bcrypt hash for your password:
+#      htpasswd -nbBC 10 "" "your-password" | tr -d ':\n' | sed 's/$2y/$2a/'
+#
+#   3. Generate a secret key for JWT signing:
+#      openssl rand -base64 32
+#
+#   4. Replace the values below with your generated hash and secret key
+#
+#   5. Seal it:
+#      kubeseal --controller-name sealed-secrets --controller-namespace sealed-secrets \
+#        -o yaml < argocd-admin-secret.yaml > helm/argocd/templates/sealed-argocd-secret.yaml
+#
 #   6. Delete the plain file: rm argocd-admin-secret.yaml
+#
+# Quick setup with default password "admin":
+#   HASH=$(htpasswd -nbBC 10 "" "admin" | tr -d ':\n' | sed 's/$2y/$2a/')
+#   SECRET_KEY=$(openssl rand -base64 32)
+#   sed -e "s|REPLACE_WITH_BCRYPT_HASH|$HASH|" \
+#       -e "s|REPLACE_WITH_SECRET_KEY|$SECRET_KEY|" \
+#       example.argocd-admin-secret.yaml > argocd-admin-secret.yaml
 #
 apiVersion: v1
 kind: Secret
@@ -329,40 +418,26 @@ metadata:
   namespace: argocd
 type: Opaque
 stringData:
-  admin.password: "$2a$10$rRyBsGSHK6.uc8fntPwVIuLVHgsAhAX7TcdrqW/RBER9bh9.a8eWy"  # default: admin
+  admin.password: "REPLACE_WITH_BCRYPT_HASH"
   admin.passwordMtime: "2024-01-01T00:00:00Z"
-  server.secretkey: "REPLACE_WITH_OUTPUT_OF_openssl_rand_-base64_32"
+  server.secretkey: "REPLACE_WITH_SECRET_KEY"
 ```
 
 Create the ArgoCD admin secret using Sealed Secrets:
 
 ```bash
-cp example.argocd-admin-secret.yaml argocd-admin-secret.yaml
-```
+# Generate values and create secret file
+HASH=$(htpasswd -nbBC 10 "" "admin" | tr -d ':\n' | sed 's/$2y/$2a/')
+SECRET_KEY=$(openssl rand -base64 32)
+sed -e "s|REPLACE_WITH_BCRYPT_HASH|$HASH|" \
+    -e "s|REPLACE_WITH_SECRET_KEY|$SECRET_KEY|" \
+    example.argocd-admin-secret.yaml > argocd-admin-secret.yaml
 
-Generate a bcrypt hash for your password:
+# Seal the secret
+kubeseal --controller-name sealed-secrets --controller-namespace sealed-secrets \
+  -o yaml < argocd-admin-secret.yaml > helm/argocd/templates/sealed-argocd-secret.yaml
 
-```bash
-htpasswd -nbBC 10 "" "your-password-here" | tr -d ':\n' | sed 's/$2y/$2a/'
-```
-
-Generate a secret key for JWT signing:
-
-```bash
-openssl rand -base64 32
-```
-
-Edit `argocd-admin-secret.yaml` and replace `admin.password` with your hash and `server.secretkey` with your generated key.
-
-Seal the secret:
-
-```bash
-kubeseal --controller-name sealed-secrets --controller-namespace sealed-secrets -o yaml < argocd-admin-secret.yaml > helm/argocd/templates/sealed-argocd-secret.yaml
-```
-
-Delete the plain secret:
-
-```bash
+# Delete the plain secret
 rm argocd-admin-secret.yaml
 ```
 
@@ -376,16 +451,61 @@ helm upgrade --install argocd ./helm/argocd -n argocd --create-namespace
 kubectl wait --for=condition=Available deployment/argocd-server -n argocd --timeout=300s
 ```
 
-## 7. Access ArgoCD
+## 8. Access ArgoCD
 
 Access UI at <https://argocd.localhost> (accept the self-signed certificate warning).
 
-Login with username `admin` and the password you set in the sealed secret.
+Login with username `admin` and password `admin` (or whatever password you set).
 
 CLI login:
 
 ```bash
 argocd login argocd.localhost --grpc-web
+```
+
+## Troubleshooting
+
+### Verify Cilium encryption
+
+```bash
+kubectl -n kube-system exec ds/cilium -- cilium-dbg encrypt status
+```
+
+### Check Gateway status
+
+```bash
+kubectl get gateway -n traefik
+```
+
+The Gateway should show `PROGRAMMED: True`.
+
+### Check HTTPRoute status
+
+```bash
+kubectl get httproute -n argocd
+```
+
+### Check certificate
+
+```bash
+kubectl get certificate -n traefik
+```
+
+### Traefik logs
+
+```bash
+kubectl logs -n traefik -l app.kubernetes.io/name=traefik
+```
+
+### If password doesn't work
+
+Regenerate and patch the secret directly:
+
+```bash
+HASH=$(htpasswd -nbBC 10 "" "admin" | tr -d ':\n' | sed 's/$2y/$2a/')
+kubectl patch secret argocd-secret -n argocd \
+  -p "{\"stringData\": {\"admin.password\": \"$HASH\", \"admin.passwordMtime\": \"$(date -Iseconds)\"}}"
+kubectl rollout restart deployment/argocd-server -n argocd
 ```
 
 ## Cleanup
