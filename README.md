@@ -1,6 +1,6 @@
 # ArgoCD Getting Started Guide (Gateway API)
 
-Local development setup using KinD, Traefik, Helm, cert-manager, and Kubernetes Gateway API.
+Local development setup using KinD, Traefik, Helm, cert-manager, Sealed Secrets, and Kubernetes Gateway API.
 
 ## Prerequisites
 
@@ -91,7 +91,54 @@ helm upgrade --install cert-manager ./helm/cert-manager -n cert-manager --create
 kubectl wait --for=condition=Available deployment/cert-manager -n cert-manager --timeout=120s
 ```
 
-## 4. Install Traefik
+## 4. Install Sealed Secrets
+
+Create `helm/sealed-secrets/Chart.yaml`:
+
+```yaml
+apiVersion: v2
+name: sealed-secrets
+version: 1.0.0
+description: Sealed Secrets controller for encrypting secrets in Git
+dependencies:
+  - name: sealed-secrets
+    version: "2.17.1"
+    repository: "https://bitnami-labs.github.io/sealed-secrets"
+```
+
+Create `helm/sealed-secrets/values.yaml`:
+
+```yaml
+sealed-secrets: {}
+```
+
+Build and install:
+
+```bash
+helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
+helm repo update
+helm dependency build ./helm/sealed-secrets
+helm upgrade --install sealed-secrets ./helm/sealed-secrets -n sealed-secrets --create-namespace
+kubectl wait --for=condition=Available deployment/sealed-secrets -n sealed-secrets --timeout=120s
+```
+
+Install kubeseal CLI:
+
+```bash
+KUBESEAL_VERSION=$(curl -s https://api.github.com/repos/bitnami-labs/sealed-secrets/releases/latest | grep -Po '"tag_name": "v\K[^"]*')
+curl -OL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz"
+tar -xvzf kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz kubeseal
+sudo install -m 755 kubeseal /usr/local/bin/kubeseal
+rm kubeseal kubeseal-*.tar.gz
+```
+
+Verify:
+
+```bash
+kubeseal --controller-name sealed-secrets --controller-namespace sealed-secrets --fetch-cert
+```
+
+## 5. Install Traefik
 
 Create `helm/traefik/Chart.yaml`:
 
@@ -192,7 +239,7 @@ helm dependency build ./helm/traefik
 helm upgrade --install traefik ./helm/traefik -n traefik --create-namespace
 ```
 
-## 5. Install ArgoCD
+## 6. Install ArgoCD
 
 Create `helm/argocd/Chart.yaml`:
 
@@ -223,6 +270,8 @@ argo-cd:
   configs:
     params:
       server.insecure: true
+    secret:
+      createSecret: false
 
   server:
     extraArgs:
@@ -262,6 +311,34 @@ spec:
 {{- end }}
 ```
 
+### Set Custom Admin Password
+
+Create the ArgoCD admin secret using Sealed Secrets:
+
+```bash
+cp example.argocd-admin-secret.yaml argocd-admin-secret.yaml
+```
+
+Generate a bcrypt hash for your password:
+
+```bash
+htpasswd -nbBC 10 "" "your-password-here" | tr -d ':\n' | sed 's/$2y/$2a/'
+```
+
+Edit `argocd-admin-secret.yaml` and replace the `admin.password` value with your hash.
+
+Seal the secret:
+
+```bash
+kubeseal --controller-name sealed-secrets --controller-namespace sealed-secrets -o yaml < argocd-admin-secret.yaml > helm/argocd/templates/sealed-argocd-secret.yaml
+```
+
+Delete the plain secret:
+
+```bash
+rm argocd-admin-secret.yaml
+```
+
 Build and install:
 
 ```bash
@@ -272,15 +349,11 @@ helm upgrade --install argocd ./helm/argocd -n argocd --create-namespace
 kubectl wait --for=condition=Available deployment/argocd-server -n argocd --timeout=300s
 ```
 
-## 6. Access ArgoCD
-
-Get admin password:
-
-```bash
-kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
-```
+## 7. Access ArgoCD
 
 Access UI at <https://argocd.localhost> (accept the self-signed certificate warning).
+
+Login with username `admin` and the password you set in the sealed secret.
 
 CLI login:
 
