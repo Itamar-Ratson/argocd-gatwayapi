@@ -13,3 +13,10 @@ tolerations:
   - key: node-role.kubernetes.io/control-plane
     operator: Equal
     effect: NoSchedule
+
+providers:
+  kubernetesGateway:
+    enabled: true
+
+gateway:
+  enabled: false
