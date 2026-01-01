@@ -1,0 +1,15 @@
+hostNetwork: true
+
+ports:
+  web:
+    port: 80
+  websecure:
+    port: 443
+
+nodeSelector:
+  ingress-ready: "true"
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Equal
+    effect: NoSchedule
