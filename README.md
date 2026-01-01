@@ -9,6 +9,14 @@ Local development setup using KinD, Traefik, Helm, and Kubernetes Gateway API.
 - Helm
 - KinD
 
+Add Helm repositories:
+
+```bash
+helm repo add traefik https://traefik.github.io/charts
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+```
+
 ## 1. Create KinD Cluster
 
 Create `kind-config.yaml`:
@@ -83,9 +91,7 @@ gateway:
 ```
 
 ```bash
-helm repo add traefik https://traefik.github.io/charts
-helm repo update
-helm install traefik traefik/traefik -n traefik --create-namespace -f traefik-values.yaml
+helm upgrade --install traefik traefik/traefik -n traefik --create-namespace -f traefik-values.yaml
 ```
 
 ## 4. Install ArgoCD
@@ -108,10 +114,8 @@ configs:
 ```
 
 ```bash
-helm repo add argo https://argoproj.github.io/argo-helm
-helm repo update
 kubectl create namespace argocd
-helm install argocd argo/argo-cd -n argocd -f argocd-values.yaml
+helm upgrade --install argocd argo/argo-cd -n argocd -f argocd-values.yaml
 kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
 ```
 
