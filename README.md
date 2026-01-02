@@ -463,6 +463,77 @@ CLI login:
 argocd login argocd.localhost --grpc-web
 ```
 
+## 9. Deploy App of Apps (Example)
+
+Create `helm/apps/Chart.yaml`:
+
+```yaml
+apiVersion: v2
+name: apps
+version: 1.0.0
+description: App of Apps example
+```
+
+Create `helm/apps/values.yaml`:
+
+```yaml
+name: apps
+
+source:
+  repoURL: https://github.com/argoproj/argocd-example-apps.git
+  targetRevision: HEAD
+  path: apps
+
+destination:
+  server: https://kubernetes.default.svc
+  namespace: argocd
+```
+
+Create `helm/apps/templates/application.yaml`:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .Values.name }}
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: {{ .Values.source.repoURL }}
+    targetRevision: {{ .Values.source.targetRevision }}
+    path: {{ .Values.source.path }}
+  destination:
+    server: {{ .Values.destination.server }}
+    namespace: {{ .Values.destination.namespace }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+Install:
+
+```bash
+helm upgrade --install apps ./helm/apps -n argocd
+```
+
+Check status:
+
+```bash
+kubectl get applications -n argocd
+```
+
+View in UI at <https://argocd.localhost>.
+
+### Delete
+
+```bash
+helm uninstall apps -n argocd
+```
+
 ## Troubleshooting
 
 ### Verify Cilium encryption
